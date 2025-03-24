@@ -1,24 +1,38 @@
 import * as fs from "fs";
-import anchor from "@project-serum/anchor";
+import anchor from "@coral-xyz/anchor";
 const { Program, Provider, web3, BN } = anchor;
 import { PublicKey } from "@solana/web3.js";
 import { assert } from "chai";
 import * as splToken from "@solana/spl-token";
 import * as crypto from "crypto";
 
+// 추가: 새로운 함수들을 별도로 임포트
+import { createMint, getOrCreateAssociatedTokenAccount, mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+
 // IDL 파일 경로 (프로젝트에 맞게 조정)
 const idlPath = `${process.cwd()}/target/idl/treasure_vault.json`;
-// IDL 파일을 문자열로 읽어온 후, "pubkey"를 "publicKey"로 치환
 const idlRaw = fs.readFileSync(idlPath, "utf8");
-const idlFixed = JSON.parse(idlRaw.replace(/"pubkey"/g, '"publicKey"'));
+let idlFixed = JSON.parse(idlRaw);
+
 // Program ID는 실제 배포된 프로그램의 ID로 설정
 const programId = new PublicKey("G8RBzoNGqmAWvhLUTpJyVhzMWCtAXk3nrBoC7Q2MEeit");
 
 describe("treasure_vault", () => {
   const provider: Provider = anchor.AnchorProvider.env();
+
+  // 간단한 sendAndConfirm 구현을 추가 (실제 사용 환경에 따라 옵션 등을 조정할 수 있음)
+  if (!provider.sendAndConfirm) {
+    provider.sendAndConfirm = async (tx, signers, options?) => {
+      // tx를 보내고 서명을 기다림
+      const signature = await provider.send(tx, signers, options);
+      // 트랜잭션 확인 (commitment 등 옵션을 활용할 수 있음)
+      await provider.connection.confirmTransaction(signature, options?.commitment || "finalized");
+      return signature;
+    };
+  }
+
   anchor.setProvider(provider);
   
-  // workspace 대신 직접 Program 객체 생성 (수정된 IDL 사용)
   const program = new Program(idlFixed, programId);
 
   // 테스트에서 사용할 계정 및 변수 설정
@@ -27,7 +41,7 @@ describe("treasure_vault", () => {
 
   let vaultPda: PublicKey, vaultBump: number;
   let feeAccountPda: PublicKey, feeBump: number;
-  let mint: splToken.Token;
+  let mint: PublicKey; // 이제 mint는 PublicKey 타입
   let assetAccount: PublicKey;
 
   const password = "secret_password";
@@ -52,23 +66,39 @@ describe("treasure_vault", () => {
       program.programId
     );
 
-    // 토큰 민트 및 계좌 생성 (hider 사용)
-    mint = await splToken.Token.createMint(
+    // **새로운 API로 토큰 민트 및 계좌 생성 (hider 사용)**
+    mint = await createMint(
       provider.connection,
-      hider, 
-      hider.publicKey, 
-      null,
-      0, 
-      splToken.TOKEN_PROGRAM_ID
+      hider,                // payer
+      hider.publicKey,      // mint authority
+      null,                 // freeze authority (없으면 null)
+      0                     // decimals
     );
-    assetAccount = await mint.createAccount(hider.publicKey);
-    await mint.mintTo(assetAccount, hider.publicKey, [hider], 100);
+
+    // hider의 Associated Token Account 생성
+    const ata = await getOrCreateAssociatedTokenAccount(
+      provider.connection,
+      hider,                // payer
+      mint,                 // mint
+      hider.publicKey       // owner
+    );
+    assetAccount = ata.address;
+
+    // 토큰 발행 (예: 100개)
+    await mintTo(
+      provider.connection,
+      hider,                // payer
+      mint,                 // mint
+      assetAccount,         // destination account
+      hider,                // authority
+      100
+    );
   });
 
   it("hides vault", async () => {
     await program.methods.hideVault(
       Array.from(passwordHash),
-      mint.publicKey,
+      mint,
       1,
       new BN(50)
     )
@@ -77,8 +107,8 @@ describe("treasure_vault", () => {
         feeAccount: feeAccountPda,
         owner: hider.publicKey,
         assetAccount: assetAccount,
-        mint: mint.publicKey,
-        tokenProgram: splToken.TOKEN_PROGRAM_ID,
+        mint: mint,
+        tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
       })
       .signers([hider])
@@ -131,7 +161,7 @@ describe("treasure_vault", () => {
       .accounts({
         vaultPda: vaultPda,
         claimer: claimer.publicKey,
-        tokenProgram: splToken.TOKEN_PROGRAM_ID,
+        tokenProgram: TOKEN_PROGRAM_ID,
       })
       .remainingAccounts([
         { pubkey: assetAccount, isSigner: false, isWritable: true },

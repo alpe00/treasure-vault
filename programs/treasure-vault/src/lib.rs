@@ -4,7 +4,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Mint, SetAuthority};
 use spl_token::instruction::AuthorityType;
 use sha2::{Sha256, Digest};
 
-declare_id!("G8RBzoNGqmAWvhLUTpJyVhzMWCtAXk3nrBoC7Q2MEeit");
+declare_id!("2j3v3oGQdpwqkm5hAFABxo3dWos8XVoJUGhx2XA2Hf11");
 
 #[program]
 pub mod treasure_vault {
@@ -153,8 +153,16 @@ pub mod treasure_vault {
 }
 
 #[derive(Accounts)]
+#[instruction(password_hash: [u8; 32])] // 이 애트리뷰트를 통해 password_hash 인자를 Accounts 컨텍스트에 노출시킵니다.
 pub struct HideVault<'info> {
-    #[account(mut)]
+    //#[account(mut)]
+    #[account(
+        init_if_needed,
+        payer = owner,
+        seeds = [b"vault", &password_hash[..]],
+        bump,
+        space = 8 + VaultPda::LEN // VaultPda의 크기를 계산한 상수
+    )]
     pub vault_pda: Account<'info, VaultPda>,
 
     #[account(init_if_needed, payer = owner, seeds = [b"fees"], bump, space = 128)]
@@ -207,6 +215,32 @@ pub struct StoredAsset {
     pub asset_account: Pubkey,
     pub asset_type: u8,
     pub amount: u64,
+}
+
+
+// StoredAsset의 바이트 크기를 정의 (Pubkey:32, Pubkey:32, u8:1, u64:8 -> 총 73 바이트)
+impl StoredAsset {
+    pub const LEN: usize = 32 + 32 + 1 + 8;
+}
+
+// VaultPda 구조체는 다음 필드들로 구성됩니다:
+// owner: Pubkey (32)
+// assets: Vec<StoredAsset> -> 벡터의 길이 4바이트 + 최대 개수 * StoredAsset::LEN (예: 최대 10개)
+// password_hash: [u8; 32] (32)
+// is_claimed: bool (1)
+// claimer: Pubkey (32)
+//
+// 그리고 계정 디스크리미네이터(8바이트)를 추가해야 합니다.
+// 예시로 최대 10개의 asset을 허용한다고 가정하면:
+impl VaultPda {
+    pub const MAX_ASSETS: usize = 10;
+    pub const LEN: usize = 32                        // owner
+        + 4 + (Self::MAX_ASSETS * StoredAsset::LEN)   // assets: 4바이트 길이 + 각 asset 크기
+        + 32                                          // password_hash
+        + 1                                           // is_claimed
+        + 32;                                         // claimer
+    // 실제 계정 공간에는 디스크리미네이터 8바이트를 더해주어야 함.
+    // 예를 들어, account init 시 space = 8 + VaultPda::LEN
 }
 
 #[account]

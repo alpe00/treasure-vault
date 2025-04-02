@@ -1,82 +1,80 @@
 import * as fs from "fs";
 import anchor from "@coral-xyz/anchor";
-const { Program, Provider, web3, BN } = anchor;
-import { PublicKey } from "@solana/web3.js";
+const { Program, Provider, BN, web3 } = anchor;
+// default import 방식으로 @solana/web3.js를 가져옵니다.
+import web3pkg from "@solana/web3.js";
+const { PublicKey, Transaction } = web3pkg;
 import { assert } from "chai";
 import * as splToken from "@solana/spl-token";
 import * as crypto from "crypto";
 
-// 추가: 새로운 함수들을 별도로 임포트
-import { createMint, getOrCreateAssociatedTokenAccount, mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+// 만약 Provider.sendAndConfirm이 없을 경우를 대비하여 프로토타입 패치 (반드시 Provider 생성 이전에)
+import { AnchorProvider } from "@coral-xyz/anchor";
+if (!AnchorProvider.prototype.sendAndConfirm) {
+  AnchorProvider.prototype.sendAndConfirm = async function (
+    tx: Transaction,
+    signers: web3.Signer[],
+    options?: anchor.web3.ConfirmOptions
+  ): Promise<string> {
+    const signature = await this.send(tx, signers, options);
+    await this.connection.confirmTransaction(signature, options?.commitment || "finalized");
+    return signature;
+  };
+}
 
-// IDL 파일 경로 (프로젝트에 맞게 조정)
-const idlPath = `${process.cwd()}/target/idl/treasure_vault.json`;
-const idlRaw = fs.readFileSync(idlPath, "utf8");
-let idlFixed = JSON.parse(idlRaw);
+// Provider 설정
+const provider: Provider = anchor.AnchorProvider.env();
+anchor.setProvider(provider);
 
-// Program ID는 실제 배포된 프로그램의 ID로 설정
-const programId = new PublicKey("G8RBzoNGqmAWvhLUTpJyVhzMWCtAXk3nrBoC7Q2MEeit");
+// 프로그램은 workspace에서 가져오거나, 직접 Program 객체를 생성할 수 있습니다.
+// 여기서는 workspace를 사용한다고 가정합니다.
+const program = anchor.workspace.TreasureVault as Program; // 타입이 자동 생성된 경우 사용
+
+// 테스트에 사용할 계정 및 변수 설정
+const hider = web3.Keypair.generate();
+const claimer = web3.Keypair.generate();
+
+let vaultPda: PublicKey, vaultBump: number;
+let feeAccountPda: PublicKey, feeBump: number;
+let mint: PublicKey;
+let assetAccount: PublicKey;
+
+// 테스트에서 사용할 비밀번호와 해시값
+const password = "secret_password_1";
+const wrongPassword = "wrong_password";
+const hashBuffer = crypto.createHash("sha256").update(password).digest();
+const passwordHash = Uint8Array.from(hashBuffer);
 
 describe("treasure_vault", () => {
-  const provider: Provider = anchor.AnchorProvider.env();
-
-  // 간단한 sendAndConfirm 구현을 추가 (실제 사용 환경에 따라 옵션 등을 조정할 수 있음)
-  if (!provider.sendAndConfirm) {
-    provider.sendAndConfirm = async (tx, signers, options?) => {
-      // tx를 보내고 서명을 기다림
-      const signature = await provider.send(tx, signers, options);
-      // 트랜잭션 확인 (commitment 등 옵션을 활용할 수 있음)
-      await provider.connection.confirmTransaction(signature, options?.commitment || "finalized");
-      return signature;
-    };
-  }
-
-  anchor.setProvider(provider);
-  
-  const program = new Program(idlFixed, programId);
-
-  // 테스트에서 사용할 계정 및 변수 설정
-  const hider = web3.Keypair.generate();
-  const claimer = web3.Keypair.generate();
-
-  let vaultPda: PublicKey, vaultBump: number;
-  let feeAccountPda: PublicKey, feeBump: number;
-  let mint: PublicKey; // 이제 mint는 PublicKey 타입
-  let assetAccount: PublicKey;
-
-  const password = "secret_password";
-  const wrongPassword = "wrong_password";
-  const hashBuffer = crypto.createHash("sha256").update(password).digest();
-  const passwordHash = Uint8Array.from(hashBuffer);
-
   before(async () => {
-    // 에어드랍 등 계정 준비
+    // hider와 claimer에게 에어드랍하여 충분한 SOL 확보
     const airdropHiderSig = await provider.connection.requestAirdrop(hider.publicKey, 2e9);
     await provider.connection.confirmTransaction(airdropHiderSig);
     const airdropClaimerSig = await provider.connection.requestAirdrop(claimer.publicKey, 2e9);
     await provider.connection.confirmTransaction(airdropClaimerSig);
 
-    // PDA 생성
+    // vault PDA 생성 (seeds: ["vault", passwordHash])
     [vaultPda, vaultBump] = await PublicKey.findProgramAddress(
       [Buffer.from("vault"), Buffer.from(passwordHash)],
       program.programId
     );
+    // fee_account PDA 생성 (seeds: ["fees"])
     [feeAccountPda, feeBump] = await PublicKey.findProgramAddress(
       [Buffer.from("fees")],
       program.programId
     );
 
-    // **새로운 API로 토큰 민트 및 계좌 생성 (hider 사용)**
-    mint = await createMint(
+    // 토큰 민트 생성 (hider가 payer 및 mint authority)
+    mint = await splToken.createMint(
       provider.connection,
       hider,                // payer
       hider.publicKey,      // mint authority
-      null,                 // freeze authority (없으면 null)
+      null,                 // freeze authority 없음
       0                     // decimals
     );
 
     // hider의 Associated Token Account 생성
-    const ata = await getOrCreateAssociatedTokenAccount(
+    const ata = await splToken.getOrCreateAssociatedTokenAccount(
       provider.connection,
       hider,                // payer
       mint,                 // mint
@@ -84,23 +82,24 @@ describe("treasure_vault", () => {
     );
     assetAccount = ata.address;
 
-    // 토큰 발행 (예: 100개)
-    await mintTo(
+    // hider에게 토큰 발행 (예: 100개)
+    await splToken.mintTo(
       provider.connection,
       hider,                // payer
       mint,                 // mint
-      assetAccount,         // destination account
-      hider,                // authority
+      assetAccount,         // destination ATA
+      hider,                // mint authority
       100
     );
   });
 
   it("hides vault", async () => {
+    // hide_vault 호출
     await program.methods.hideVault(
-      Array.from(passwordHash),
-      mint,
-      1,
-      new BN(50)
+      Array.from(passwordHash), // [u8;32] 배열
+      mint,                     // 토큰 민트
+      1,                        // asset_type (예시)
+      new BN(50)                // amount (예시)
     )
       .accounts({
         vaultPda: vaultPda,
@@ -108,19 +107,22 @@ describe("treasure_vault", () => {
         owner: hider.publicKey,
         assetAccount: assetAccount,
         mint: mint,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        tokenProgram: splToken.TOKEN_PROGRAM_ID,
         systemProgram: web3.SystemProgram.programId,
       })
       .signers([hider])
       .rpc();
 
+    // vault 계정 데이터를 가져와 검증
     const vaultAccount = await program.account.vaultPda.fetch(vaultPda);
     assert.ok(vaultAccount.owner.equals(hider.publicKey));
     assert.strictEqual(
-      Buffer.from(vaultAccount.passwordHash).toString("hex"),
+      Buffer.from(vaultAccount.password_hash).toString("hex"),
       Buffer.from(passwordHash).toString("hex")
     );
-    assert.ok(vaultAccount.isClaimed === false);
+    assert.ok(vaultAccount.is_claimed === false);
+    // assets 배열에 자산 정보가 추가되었는지 확인 (적어도 하나 이상)
+    assert.ok(vaultAccount.assets.length > 0);
   });
 
   it("fails to unlock vault with wrong password", async () => {
@@ -137,6 +139,7 @@ describe("treasure_vault", () => {
       assert.fail("Unlocking with wrong password should have failed");
     } catch (err) {
       const errMsg = err.toString();
+      // 에러 메시지에 "Invalid password" 또는 "InvalidPassword"가 포함되어야 합니다.
       assert.ok(errMsg.includes("Invalid password") || errMsg.includes("InvalidPassword"));
     }
   });
@@ -153,15 +156,17 @@ describe("treasure_vault", () => {
       .rpc();
 
     const vaultAccount = await program.account.vaultPda.fetch(vaultPda);
+    // unlock 후, vault 계정의 claimer 필드가 claimer의 publicKey로 설정되어야 합니다.
     assert.ok(vaultAccount.claimer.equals(claimer.publicKey));
   });
 
   it("claims treasure", async () => {
+    // claim_treasure 호출; remaining_accounts에 숨겨진 자산 계좌(assetAccount) 전달
     await program.methods.claimTreasure(vaultBump)
       .accounts({
         vaultPda: vaultPda,
         claimer: claimer.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        tokenProgram: splToken.TOKEN_PROGRAM_ID,
       })
       .remainingAccounts([
         { pubkey: assetAccount, isSigner: false, isWritable: true },
@@ -170,7 +175,8 @@ describe("treasure_vault", () => {
       .rpc();
 
     const vaultAccount = await program.account.vaultPda.fetch(vaultPda);
-    assert.ok(vaultAccount.isClaimed === true);
+    // claim 후, vault가 클레임되었고, 자산 목록이 비워져야 합니다.
+    assert.ok(vaultAccount.is_claimed === true);
     assert.strictEqual(vaultAccount.assets.length, 0);
   });
 });

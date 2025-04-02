@@ -40,7 +40,7 @@ let mint: PublicKey;
 let assetAccount: PublicKey;
 
 // 테스트에서 사용할 비밀번호와 해시값
-const password = "secret_password_1";
+const password = "secret_password_3";
 const wrongPassword = "wrong_password";
 const hashBuffer = crypto.createHash("sha256").update(password).digest();
 const passwordHash = Uint8Array.from(hashBuffer);
@@ -117,10 +117,10 @@ describe("treasure_vault", () => {
     const vaultAccount = await program.account.vaultPda.fetch(vaultPda);
     assert.ok(vaultAccount.owner.equals(hider.publicKey));
     assert.strictEqual(
-      Buffer.from(vaultAccount.password_hash).toString("hex"),
+      Buffer.from(vaultAccount.passwordHash).toString("hex"),
       Buffer.from(passwordHash).toString("hex")
     );
-    assert.ok(vaultAccount.is_claimed === false);
+    assert.ok(vaultAccount.isClaimed === false);
     // assets 배열에 자산 정보가 추가되었는지 확인 (적어도 하나 이상)
     assert.ok(vaultAccount.assets.length > 0);
   });
@@ -176,7 +176,7 @@ describe("treasure_vault", () => {
 
     const vaultAccount = await program.account.vaultPda.fetch(vaultPda);
     // claim 후, vault가 클레임되었고, 자산 목록이 비워져야 합니다.
-    assert.ok(vaultAccount.is_claimed === true);
+    assert.ok(vaultAccount.isClaimed === true);
     assert.strictEqual(vaultAccount.assets.length, 0);
   });
 });

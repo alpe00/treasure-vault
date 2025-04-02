@@ -26,6 +26,18 @@ if (!AnchorProvider.prototype.sendAndConfirm) {
 const provider: Provider = anchor.AnchorProvider.env();
 anchor.setProvider(provider);
 
+/*
+// IDL 파일 경로 (프로젝트에 맞게 조정)
+const idlPath = `${process.cwd()}/target/idl/treasure_vault.json`;
+const idlRaw = fs.readFileSync(idlPath, "utf8");
+let idlFixed = JSON.parse(idlRaw);
+
+// Program ID는 실제 배포된 프로그램의 ID로 설정
+const programId = new PublicKey("2j3v3oGQdpwqkm5hAFABxo3dWos8XVoJUGhx2XA2Hf11");
+
+const program = new Program(idlFixed, programId);
+*/
+
 // 프로그램은 workspace에서 가져오거나, 직접 Program 객체를 생성할 수 있습니다.
 // 여기서는 workspace를 사용한다고 가정합니다.
 const program = anchor.workspace.TreasureVault as Program; // 타입이 자동 생성된 경우 사용
